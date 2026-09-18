@@ -36,10 +36,24 @@ import {
   getUniquePropertyImages
 } from './propertyImages.js';
 
+const SMARTNEST_API_URL = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_API_URL || import.meta.env?.VITE_SMARTNEST_API_URL)) || 'http://localhost:5000/api';
+
 // Configurable Demo Mode
 const DEMO_STORAGE_KEY = 'smartnest_demo_mode';
 export const getDemoMode = () => {
   if (typeof localStorage === 'undefined') return true;
+  const isRemote = typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
+  const isApiLocalhost = !SMARTNEST_API_URL ||
+    SMARTNEST_API_URL.includes('localhost') ||
+    SMARTNEST_API_URL.includes('127.0.0.1');
+
+  // When deployed to remote host (like Vercel) with localhost backend URL,
+  // enforce client-side intelligence to prevent mixed-content / unreachable localhost calls
+  if (isRemote && isApiLocalhost) {
+    return true;
+  }
   const stored = localStorage.getItem(DEMO_STORAGE_KEY);
   return stored !== null ? JSON.parse(stored) : true; // Default true
 };
@@ -52,8 +66,6 @@ export const setDemoMode = (enabled) => {
     window.dispatchEvent(new Event('smartnest_demo_mode_changed'));
   }
 };
-
-const SMARTNEST_API_URL = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_API_URL || import.meta.env?.VITE_SMARTNEST_API_URL)) || 'http://localhost:5000/api';
 
 // In-Memory / LocalStorage State for Mock Backend
 const getStore = (key, defaultVal) => {
@@ -664,6 +676,17 @@ const mockLatency = (ms = 300) => new Promise((resolve) => setTimeout(resolve, m
 
 // Generic HTTP fetcher for live SNS Workflows backend
 async function httpCall(endpoint, options = {}) {
+  const isRemote = typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
+  const isApiLocalhost = !SMARTNEST_API_URL ||
+    SMARTNEST_API_URL.includes('localhost') ||
+    SMARTNEST_API_URL.includes('127.0.0.1');
+
+  if (isRemote && isApiLocalhost) {
+    throw new Error(`Cannot reach local backend (${SMARTNEST_API_URL}) from remote deployment`);
+  }
+
   const sessionId = localStorage.getItem('smartnest_session_id') || 'anonymous_session';
   const token = localStorage.getItem('smartnest_token') || '';
 
@@ -687,7 +710,7 @@ async function httpCall(endpoint, options = {}) {
 
     return await response.json();
   } catch (error) {
-    console.error(`API Error [${endpoint}]:`, error);
+    console.warn(`API Error [${endpoint}]:`, error);
     throw error;
   }
 }
@@ -786,181 +809,198 @@ export const api = {
 
   // ── BUYER ENDPOINTS ────────────────────────────────────────
   async getBuyerPreferences(userId = 'usr_buyer_01') {
-    if (getDemoMode()) {
-      await mockLatency(150);
-      return buyerPreferencesStore;
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/preferences/${userId}`);
+      } catch (err) {
+        console.warn('[getBuyerPreferences] Live call failed, falling back to local store:', err.message);
+      }
     }
-    return httpCall(`/buyer/preferences/${userId}`);
+    await mockLatency(150);
+    return buyerPreferencesStore;
   },
 
   async updateBuyerPreferences(prefs, userId = 'usr_buyer_01') {
-    if (getDemoMode()) {
-      await mockLatency(200);
-      buyerPreferencesStore = { ...buyerPreferencesStore, ...prefs };
-      setStore('buyer_preferences', buyerPreferencesStore);
-      return buyerPreferencesStore;
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/preferences/${userId}`, {
+          method: 'PUT',
+          body: JSON.stringify(prefs)
+        });
+      } catch (err) {
+        console.warn('[updateBuyerPreferences] Live call failed, falling back to local store:', err.message);
+      }
     }
-    return httpCall(`/buyer/preferences/${userId}`, {
-      method: 'PUT',
-      body: JSON.stringify(prefs)
-    });
+    await mockLatency(200);
+    buyerPreferencesStore = { ...buyerPreferencesStore, ...prefs };
+    setStore('buyer_preferences', buyerPreferencesStore);
+    return buyerPreferencesStore;
   },
 
   async analyzeLifestyle(preferences) {
-    if (getDemoMode()) {
-      await mockLatency(450);
-      const householdType = preferences.household_type || (preferences.family_size > 2 ? 'family' : preferences.family_size === 2 ? 'couple' : 'bachelor');
-      const familySize = preferences.family_size || (householdType === 'family' ? 4 : householdType === 'couple' ? 2 : 1);
-
-      // Sync buyer preferences store with household_type and fallback family_size
-      buyerPreferencesStore = {
-        ...buyerPreferencesStore,
-        ...preferences,
-        household_type: householdType,
-        family_size: familySize
-      };
-      setStore('buyer_preferences', buyerPreferencesStore);
-
-      const budgetLakhs = preferences.budget ? Math.round(preferences.budget / 100000) : 60;
-      const lifestyleType = householdType === 'family'
-        ? "Family-Oriented Professional"
-        : householdType === 'couple'
-        ? "Modern Dual-Income Couple"
-        : "Tech-Driven Urbanite";
-
-      const profile = {
-        lifestyle_type: lifestyleType,
-        ai_summary: `Calculated priority index favors ${preferences.commute_mode || 'convenient'} commuting (max ${preferences.max_commute || 30}m) in ${preferences.city || 'Coimbatore'}. Key criteria include keeping acquisition budget below ₹${budgetLakhs}L with acoustic noise suppression.`,
-        priority_weights: {
-          commute: 25,
-          budget: 25,
-          schools: preferences.school_importance === 'high' ? 25 : 15,
-          noise: preferences.noise_pref === 'quiet' ? 20 : 10,
-          parks: preferences.park_walking ? 15 : 10,
-          amenities: (preferences.amenities?.length || 0) > 6 ? 15 : 10
-        },
-        dealbreakers: [
-          preferences.max_commute ? `Commute above ${preferences.max_commute} minutes` : null,
-          (preferences.noise_pref === 'quiet' || preferences.dealbreakers?.noise_low) ? "High noise" : null,
-          `Budget above ₹${budgetLakhs}L`
-        ].filter(Boolean)
-      };
-      lifestyleProfileStore = profile;
-      setStore('lifestyle_profile', profile);
-      return profile;
+    if (!getDemoMode()) {
+      try {
+        return await httpCall('/buyer/analyze', {
+          method: 'POST',
+          body: JSON.stringify(preferences)
+        });
+      } catch (err) {
+        console.warn('[analyzeLifestyle] Live call failed, falling back to local intelligence:', err.message);
+      }
     }
-    return httpCall('/buyer/analyze', {
-      method: 'POST',
-      body: JSON.stringify(preferences)
-    });
+    await mockLatency(450);
+    const householdType = preferences.household_type || (preferences.family_size > 2 ? 'family' : preferences.family_size === 2 ? 'couple' : 'bachelor');
+    const familySize = preferences.family_size || (householdType === 'family' ? 4 : householdType === 'couple' ? 2 : 1);
+
+    // Sync buyer preferences store with household_type and fallback family_size
+    buyerPreferencesStore = {
+      ...buyerPreferencesStore,
+      ...preferences,
+      household_type: householdType,
+      family_size: familySize
+    };
+    setStore('buyer_preferences', buyerPreferencesStore);
+
+    const budgetLakhs = preferences.budget ? Math.round(preferences.budget / 100000) : 60;
+    const lifestyleType = householdType === 'family'
+      ? "Family-Oriented Professional"
+      : householdType === 'couple'
+      ? "Modern Dual-Income Couple"
+      : "Tech-Driven Urbanite";
+
+    const profile = {
+      lifestyle_type: lifestyleType,
+      ai_summary: `Calculated priority index favors ${preferences.commute_mode || 'convenient'} commuting (max ${preferences.max_commute || 30}m) in ${preferences.city || 'Coimbatore'}. Key criteria include keeping acquisition budget below ₹${budgetLakhs}L with acoustic noise suppression.`,
+      priority_weights: {
+        commute: 25,
+        budget: 25,
+        schools: preferences.school_importance === 'high' ? 25 : 15,
+        noise: preferences.noise_pref === 'quiet' ? 20 : 10,
+        parks: preferences.park_walking ? 15 : 10,
+        amenities: (preferences.amenities?.length || 0) > 6 ? 15 : 10
+      },
+      dealbreakers: [
+        preferences.max_commute ? `Commute above ${preferences.max_commute} minutes` : null,
+        (preferences.noise_pref === 'quiet' || preferences.dealbreakers?.noise_low) ? "High noise" : null,
+        `Budget above ₹${budgetLakhs}L`
+      ].filter(Boolean)
+    };
+    lifestyleProfileStore = profile;
+    setStore('lifestyle_profile', profile);
+    return profile;
   },
 
   async getRecommendations(filters = {}) {
-    if (getDemoMode()) {
-      await mockLatency(350);
-
-      // Reset session if explicitly requested
-      if (filters.reset_session) {
-        lastShownPropertyIds.clear();
+    if (!getDemoMode()) {
+      try {
+        return await httpCall('/buyer/recommend', {
+          method: 'POST',
+          body: JSON.stringify(filters)
+        });
+      } catch (err) {
+        console.warn('[getRecommendations] Live endpoint unavailable, falling back to deterministic workflow engine:', err.message);
       }
-
-      // Dynamic compatibility calculation using search preferences
-      const effectivePreferences = {
-        ...buyerPreferencesStore,
-        ...(filters.budget ? { budget: Number(filters.budget) } : {}),
-        ...(filters.max_price ? { budget: Number(filters.max_price) } : {}),
-        ...(filters.bhk && filters.bhk.length === 1 ? { bhk: Number(filters.bhk[0]) } : {}),
-        ...(filters.max_commute ? { max_commute: Number(filters.max_commute) } : {}),
-        ...(filters.noise && filters.noise !== 'all' ? { noise_pref: filters.noise === 'low' ? 'quiet' : filters.noise } : {}),
-        ...(filters.priority ? { priority: filters.priority } : {}),
-        ...(filters.school_importance ? { school_importance: filters.school_importance } : {}),
-        ...(filters.family_friendly ? { family_friendly: true } : {}),
-        ...(filters.commute_priority ? { commute_priority: true } : {}),
-        ...(filters.budget_priority ? { budget_priority: true } : {})
-      };
-
-      syncPropertiesStore();
-      let results = propertiesStore.filter((p) => p.status === 'active');
-
-      // Zero frontend business logic: backend executes workflowCompatibilityAnalysis for each property
-      results = results.map((p) => {
-        const analysis = workflowCompatibilityAnalysis(effectivePreferences, p);
-        return {
-          ...p,
-          match_score: analysis.overall_score,
-          compatibility_score: analysis.overall_score,
-          match_rating: analysis.match_rating,
-          score_breakdown: analysis.score_breakdown,
-          ai_explanation: analysis.explanation,
-          strengths: analysis.strengths,
-          tradeoffs: analysis.tradeoffs
-        };
-      });
-
-      // Backend simulated filtering
-      if (filters.bhk && filters.bhk.length > 0) {
-        results = results.filter((p) => filters.bhk.includes(p.bhk));
-      }
-      if (filters.noise && filters.noise !== 'all') {
-        results = results.filter((p) => p.noise_level === filters.noise);
-      }
-      if (filters.max_price) {
-        results = results.filter((p) => p.price <= filters.max_price);
-      }
-      if (filters.min_green_score) {
-        results = results.filter((p) => p.green_score >= filters.min_green_score);
-      }
-      if (filters.max_commute) {
-        results = results.filter((p) => p.commute_minutes <= filters.max_commute);
-      }
-
-      // Backend sorting
-      const sortBy = filters.sort_by || 'match';
-      if (sortBy === 'match') {
-        results.sort((a, b) => b.match_score - a.match_score);
-      } else if (sortBy === 'price_asc') {
-        results.sort((a, b) => a.price - b.price);
-      } else if (sortBy === 'price_desc') {
-        results.sort((a, b) => b.price - a.price);
-      } else if (sortBy === 'commute') {
-        results.sort((a, b) => a.commute_minutes - b.commute_minutes);
-      }
-
-      // Soft Preference Selection:
-      // Prefer properties not shown in immediately previous recommendation set.
-      // If fewer than 10 fresh properties match, fill remaining slots with previously shown
-      // properties so the user always gets up to 10 matching properties.
-      // NEVER return 0 properties unless there are genuinely 0 properties matching active criteria.
-      const freshCandidates = results.filter((p) => !lastShownPropertyIds.has(p.property_id));
-      const previousCandidates = results.filter((p) => lastShownPropertyIds.has(p.property_id));
-
-      const limit = Math.max(30, results.length);
-      let finalResults = [];
-      if (freshCandidates.length >= limit) {
-        finalResults = freshCandidates.slice(0, limit);
-      } else {
-        finalResults = [...freshCandidates, ...previousCandidates].slice(0, limit);
-      }
-
-      // Safeguard: never return 0 properties if results has matches
-      if (finalResults.length === 0 && results.length > 0) {
-        finalResults = results.slice(0, limit);
-      }
-
-      // Update lastShownPropertyIds to remember currently displayed properties for next search
-      lastShownPropertyIds = new Set(finalResults.map((p) => p.property_id));
-
-      return {
-        properties: finalResults,
-        total_matched: finalResults.length,
-        total_matching_pool: results.length,
-        profile: lifestyleProfileStore
-      };
     }
-    return httpCall('/buyer/recommend', {
-      method: 'POST',
-      body: JSON.stringify(filters)
+
+    await mockLatency(350);
+
+    // Reset session if explicitly requested
+    if (filters.reset_session) {
+      lastShownPropertyIds.clear();
+    }
+
+    // Dynamic compatibility calculation using search preferences
+    const effectivePreferences = {
+      ...buyerPreferencesStore,
+      ...(filters.budget ? { budget: Number(filters.budget) } : {}),
+      ...(filters.max_price ? { budget: Number(filters.max_price) } : {}),
+      ...(filters.bhk && filters.bhk.length === 1 ? { bhk: Number(filters.bhk[0]) } : {}),
+      ...(filters.max_commute ? { max_commute: Number(filters.max_commute) } : {}),
+      ...(filters.noise && filters.noise !== 'all' ? { noise_pref: filters.noise === 'low' ? 'quiet' : filters.noise } : {}),
+      ...(filters.priority ? { priority: filters.priority } : {}),
+      ...(filters.school_importance ? { school_importance: filters.school_importance } : {}),
+      ...(filters.family_friendly ? { family_friendly: true } : {}),
+      ...(filters.commute_priority ? { commute_priority: true } : {}),
+      ...(filters.budget_priority ? { budget_priority: true } : {})
+    };
+
+    syncPropertiesStore();
+    let results = propertiesStore.filter((p) => p.status === 'active');
+
+    // Zero frontend business logic: backend executes workflowCompatibilityAnalysis for each property
+    results = results.map((p) => {
+      const analysis = workflowCompatibilityAnalysis(effectivePreferences, p);
+      return {
+        ...p,
+        match_score: analysis.overall_score,
+        compatibility_score: analysis.overall_score,
+        match_rating: analysis.match_rating,
+        score_breakdown: analysis.score_breakdown,
+        ai_explanation: analysis.explanation,
+        strengths: analysis.strengths,
+        tradeoffs: analysis.tradeoffs
+      };
     });
+
+    // Backend simulated filtering
+    if (filters.bhk && filters.bhk.length > 0) {
+      results = results.filter((p) => filters.bhk.includes(p.bhk));
+    }
+    if (filters.noise && filters.noise !== 'all') {
+      results = results.filter((p) => p.noise_level === filters.noise);
+    }
+    if (filters.max_price) {
+      results = results.filter((p) => p.price <= filters.max_price);
+    }
+    if (filters.min_green_score) {
+      results = results.filter((p) => p.green_score >= filters.min_green_score);
+    }
+    if (filters.max_commute) {
+      results = results.filter((p) => p.commute_minutes <= filters.max_commute);
+    }
+
+    // Backend sorting
+    const sortBy = filters.sort_by || 'match';
+    if (sortBy === 'match') {
+      results.sort((a, b) => b.match_score - a.match_score);
+    } else if (sortBy === 'price_asc') {
+      results.sort((a, b) => a.price - b.price);
+    } else if (sortBy === 'price_desc') {
+      results.sort((a, b) => b.price - a.price);
+    } else if (sortBy === 'commute') {
+      results.sort((a, b) => a.commute_minutes - b.commute_minutes);
+    }
+
+    // Soft Preference Selection:
+    // Prefer properties not shown in immediately previous recommendation set.
+    // If fewer than 10 fresh properties match, fill remaining slots with previously shown
+    // properties so the user always gets up to 10 matching properties.
+    // NEVER return 0 properties unless there are genuinely 0 properties matching active criteria.
+    const freshCandidates = results.filter((p) => !lastShownPropertyIds.has(p.property_id));
+    const previousCandidates = results.filter((p) => lastShownPropertyIds.has(p.property_id));
+
+    const limit = Math.max(30, results.length);
+    let finalResults = [];
+    if (freshCandidates.length >= limit) {
+      finalResults = freshCandidates.slice(0, limit);
+    } else {
+      finalResults = [...freshCandidates, ...previousCandidates].slice(0, limit);
+    }
+
+    // Safeguard: never return 0 properties if results has matches
+    if (finalResults.length === 0 && results.length > 0) {
+      finalResults = results.slice(0, limit);
+    }
+
+    // Update lastShownPropertyIds to remember currently displayed properties for next search
+    lastShownPropertyIds = new Set(finalResults.map((p) => p.property_id));
+
+    return {
+      properties: finalResults,
+      total_matched: finalResults.length,
+      total_matching_pool: results.length,
+      profile: lifestyleProfileStore
+    };
   },
 
   async resetRecommendationSession() {
@@ -977,36 +1017,221 @@ export const api = {
   },
 
   async getSearchHistory(sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(200);
-      return searchHistoryStore;
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/history/${sessionId}`);
+      } catch (err) {
+        console.warn('[getSearchHistory] Live call failed, falling back to local store:', err.message);
+      }
     }
-    return httpCall(`/buyer/history/${sessionId}`);
+    await mockLatency(200);
+    return searchHistoryStore;
   },
 
   async aiSearch(query, sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(600);
-      const lower = query.toLowerCase();
-      const matches = propertiesStore.filter((p) => {
-        if (p.status !== 'active') return false;
-        if (lower.includes('quiet') || lower.includes('low noise')) {
-          if (p.noise_level !== 'low') return false;
-        }
-        if (lower.includes('villa')) {
-          return p.type.toLowerCase() === 'villa';
-        }
-        if (lower.includes('apartment') || lower.includes('condo')) {
-          return p.type.toLowerCase() === 'apartment';
-        }
-        if (lower.includes('2bhk') || lower.includes('2 bhk')) {
-          return p.bhk === 2;
-        }
-        if (lower.includes('3bhk') || lower.includes('3 bhk')) {
-          return p.bhk === 3;
-        }
-        return true;
-      }).map((p) => {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall('/buyer/search/ai', {
+          method: 'POST',
+          body: JSON.stringify({ query, session_id: sessionId })
+        });
+      } catch (err) {
+        console.warn('[aiSearch] Live call failed, falling back to local workflow:', err.message);
+      }
+    }
+    await mockLatency(600);
+    const lower = query.toLowerCase();
+    const matches = propertiesStore.filter((p) => {
+      if (p.status !== 'active') return false;
+      if (lower.includes('quiet') || lower.includes('low noise')) {
+        if (p.noise_level !== 'low') return false;
+      }
+      if (lower.includes('villa')) {
+        return p.type.toLowerCase() === 'villa';
+      }
+      if (lower.includes('apartment') || lower.includes('condo')) {
+        return p.type.toLowerCase() === 'apartment';
+      }
+      if (lower.includes('2bhk') || lower.includes('2 bhk')) {
+        return p.bhk === 2;
+      }
+      if (lower.includes('3bhk') || lower.includes('3 bhk')) {
+        return p.bhk === 3;
+      }
+      return true;
+    }).map((p) => {
+      const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, p);
+      return {
+        ...p,
+        match_score: analysis.overall_score,
+        match_rating: analysis.match_rating,
+        score_breakdown: analysis.score_breakdown
+      };
+    });
+
+    // Record in search history
+    const newEntry = {
+      history_id: `hist_${Date.now()}`,
+      summary: query,
+      date: new Date().toISOString(),
+      results_count: matches.length,
+      params: { query }
+    };
+    searchHistoryStore = [newEntry, ...searchHistoryStore.slice(0, 9)];
+    setStore('history', searchHistoryStore);
+
+    return {
+      query,
+      count: matches.length,
+      properties: matches.length > 0 ? matches : propertiesStore.slice(0, 3)
+    };
+  },
+
+  async saveProperty(propertyId, sessionId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall('/buyer/shortlist', {
+          method: 'POST',
+          body: JSON.stringify({ property_id: propertyId, session_id: sessionId })
+        });
+      } catch (err) {
+        console.warn('[saveProperty] Live call failed, falling back to local store:', err.message);
+      }
+    }
+    await mockLatency(200);
+    if (!shortlistStore.includes(propertyId)) {
+      shortlistStore = [...shortlistStore, propertyId];
+      setStore('shortlist', shortlistStore);
+    }
+    return { success: true, saved_ids: shortlistStore };
+  },
+
+  async removeSavedProperty(propertyId, sessionId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/shortlist/${propertyId}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ session_id: sessionId })
+        });
+      } catch (err) {
+        console.warn('[removeSavedProperty] Live call failed, falling back to local store:', err.message);
+      }
+    }
+    await mockLatency(200);
+    shortlistStore = shortlistStore.filter((id) => id !== propertyId);
+    setStore('shortlist', shortlistStore);
+    return { success: true, saved_ids: shortlistStore };
+  },
+
+  async getSavedProperties(sessionId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/shortlist/${sessionId}`);
+      } catch (err) {
+        console.warn('[getSavedProperties] Live call failed, falling back to local store:', err.message);
+      }
+    }
+    await mockLatency(250);
+    const savedProps = propertiesStore
+      .filter((p) => shortlistStore.includes(p.property_id))
+      .map((p) => {
+        const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, p);
+        return {
+          ...p,
+          match_score: analysis.overall_score,
+          match_rating: analysis.match_rating,
+          score_breakdown: analysis.score_breakdown
+        };
+      });
+    return { properties: savedProps, count: savedProps.length };
+  },
+
+  // ── COMPATIBILITY & INTELLIGENCE ENDPOINTS ──────────────────
+  /**
+   * FEATURE 1: Lifestyle Compatibility Score
+   * Calculates deterministic compatibility for property & buyer
+   */
+  async getCompatibilityScore(propertyId, sessionId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/compatibility/${propertyId}`);
+      } catch (err) {
+        console.warn('[getCompatibilityScore] Live call failed, falling back to local workflow:', err.message);
+      }
+    }
+    await mockLatency(250);
+    const prop = propertiesStore.find((p) => p.property_id === propertyId);
+    if (!prop) throw new Error("Property not found");
+    return workflowCompatibilityAnalysis(buyerPreferencesStore, prop);
+  },
+
+  /**
+   * FEATURE 3: Why This Property & What You Gain / Sacrifice
+   */
+  async getWhyThisProperty(propertyId, sessionId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/buyer/property/${propertyId}/why`);
+      } catch (err) {
+        console.warn('[getWhyThisProperty] Live call failed, falling back to local workflow:', err.message);
+      }
+    }
+    await mockLatency(250);
+    const prop = propertiesStore.find((p) => p.property_id === propertyId);
+    if (!prop) throw new Error("Property not found");
+    return workflowWhyThisProperty(buyerPreferencesStore, prop);
+  },
+
+  // ── PROPERTIES ─────────────────────────────────────────────
+  async getProperty(propertyId) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall(`/property/${propertyId}`);
+      } catch (err) {
+        console.warn('[getProperty] Live call failed, falling back to local store:', err.message);
+      }
+    }
+    await mockLatency(250);
+    syncPropertiesStore();
+    const found = propertiesStore.find((p) => p.property_id === propertyId || p.legacy_id === propertyId);
+    if (!found) {
+      throw new Error("Property not found");
+    }
+    const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, found);
+    const whyData = workflowWhyThisProperty(buyerPreferencesStore, found);
+    return {
+      ...found,
+      match_score: analysis.overall_score,
+      compatibility_score: analysis.overall_score,
+      match_rating: analysis.match_rating,
+      score_breakdown: analysis.score_breakdown,
+      ai_explanation: analysis.explanation,
+      strengths: analysis.strengths,
+      tradeoffs: analysis.tradeoffs,
+      what_you_gain: whyData.what_you_gain,
+      what_you_sacrifice: whyData.what_you_sacrifice
+    };
+  },
+
+  /**
+   * FEATURE 2: AI Property Comparison
+   */
+  async compareProperties(ids = []) {
+    if (!getDemoMode()) {
+      try {
+        return await httpCall('/property/compare', {
+          method: 'POST',
+          body: JSON.stringify({ ids })
+        });
+      } catch (err) {
+        console.warn('[compareProperties] Live call failed, falling back to local workflow:', err.message);
+      }
+    }
+    await mockLatency(300);
+    const selected = ids
+      .map((id) => propertiesStore.find((p) => p.property_id === id || p.legacy_id === id))
+      .filter(Boolean)
+      .map((p) => {
         const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, p);
         return {
           ...p,
@@ -1016,165 +1241,16 @@ export const api = {
         };
       });
 
-      // Record in search history
-      const newEntry = {
-        history_id: `hist_${Date.now()}`,
-        summary: query,
-        date: new Date().toISOString(),
-        results_count: matches.length,
-        params: { query }
-      };
-      searchHistoryStore = [newEntry, ...searchHistoryStore.slice(0, 9)];
-      setStore('history', searchHistoryStore);
-
-      return {
-        query,
-        count: matches.length,
-        properties: matches.length > 0 ? matches : propertiesStore.slice(0, 3)
-      };
+    let aiComparison = null;
+    if (selected.length >= 2) {
+      aiComparison = workflowAIPropertyComparison(buyerPreferencesStore, selected[0], selected[1]);
     }
-    return httpCall('/buyer/search/ai', {
-      method: 'POST',
-      body: JSON.stringify({ query, session_id: sessionId })
-    });
-  },
 
-  async saveProperty(propertyId, sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(200);
-      if (!shortlistStore.includes(propertyId)) {
-        shortlistStore = [...shortlistStore, propertyId];
-        setStore('shortlist', shortlistStore);
-      }
-      return { success: true, saved_ids: shortlistStore };
-    }
-    return httpCall('/buyer/shortlist', {
-      method: 'POST',
-      body: JSON.stringify({ property_id: propertyId, session_id: sessionId })
-    });
-  },
-
-  async removeSavedProperty(propertyId, sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(200);
-      shortlistStore = shortlistStore.filter((id) => id !== propertyId);
-      setStore('shortlist', shortlistStore);
-      return { success: true, saved_ids: shortlistStore };
-    }
-    return httpCall(`/buyer/shortlist/${propertyId}`, {
-      method: 'DELETE',
-      body: JSON.stringify({ session_id: sessionId })
-    });
-  },
-
-  async getSavedProperties(sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(250);
-      const savedProps = propertiesStore
-        .filter((p) => shortlistStore.includes(p.property_id))
-        .map((p) => {
-          const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, p);
-          return {
-            ...p,
-            match_score: analysis.overall_score,
-            match_rating: analysis.match_rating,
-            score_breakdown: analysis.score_breakdown
-          };
-        });
-      return { properties: savedProps, count: savedProps.length };
-    }
-    return httpCall(`/buyer/shortlist/${sessionId}`);
-  },
-
-  // ── COMPATIBILITY & INTELLIGENCE ENDPOINTS ──────────────────
-  /**
-   * FEATURE 1: Lifestyle Compatibility Score
-   * Calculates deterministic compatibility for property & buyer
-   */
-  async getCompatibilityScore(propertyId, sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(250);
-      const prop = propertiesStore.find((p) => p.property_id === propertyId);
-      if (!prop) throw new Error("Property not found");
-      return workflowCompatibilityAnalysis(buyerPreferencesStore, prop);
-    }
-    return httpCall(`/buyer/compatibility/${propertyId}`);
-  },
-
-  /**
-   * FEATURE 3: Why This Property & What You Gain / Sacrifice
-   */
-  async getWhyThisProperty(propertyId, sessionId) {
-    if (getDemoMode()) {
-      await mockLatency(250);
-      const prop = propertiesStore.find((p) => p.property_id === propertyId);
-      if (!prop) throw new Error("Property not found");
-      return workflowWhyThisProperty(buyerPreferencesStore, prop);
-    }
-    return httpCall(`/buyer/property/${propertyId}/why`);
-  },
-
-  // ── PROPERTIES ─────────────────────────────────────────────
-  async getProperty(propertyId) {
-    if (getDemoMode()) {
-      await mockLatency(250);
-      syncPropertiesStore();
-      const found = propertiesStore.find((p) => p.property_id === propertyId || p.legacy_id === propertyId);
-      if (!found) {
-        throw new Error("Property not found");
-      }
-      const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, found);
-      const whyData = workflowWhyThisProperty(buyerPreferencesStore, found);
-      return {
-        ...found,
-        match_score: analysis.overall_score,
-        compatibility_score: analysis.overall_score,
-        match_rating: analysis.match_rating,
-        score_breakdown: analysis.score_breakdown,
-        ai_explanation: analysis.explanation,
-        strengths: analysis.strengths,
-        tradeoffs: analysis.tradeoffs,
-        what_you_gain: whyData.what_you_gain,
-        what_you_sacrifice: whyData.what_you_sacrifice
-      };
-    }
-    return httpCall(`/property/${propertyId}`);
-  },
-
-  /**
-   * FEATURE 2: AI Property Comparison
-   */
-  async compareProperties(ids = []) {
-    if (getDemoMode()) {
-      await mockLatency(300);
-      const selected = ids
-        .map((id) => propertiesStore.find((p) => p.property_id === id || p.legacy_id === id))
-        .filter(Boolean)
-        .map((p) => {
-          const analysis = workflowCompatibilityAnalysis(buyerPreferencesStore, p);
-          return {
-            ...p,
-            match_score: analysis.overall_score,
-            match_rating: analysis.match_rating,
-            score_breakdown: analysis.score_breakdown
-          };
-        });
-
-      let aiComparison = null;
-      if (selected.length >= 2) {
-        aiComparison = workflowAIPropertyComparison(buyerPreferencesStore, selected[0], selected[1]);
-      }
-
-      return {
-        properties: selected,
-        ai_comparison_summary: aiComparison?.summary || "Select at least 2 properties to generate an AI comparison summary.",
-        ai_comparison: aiComparison
-      };
-    }
-    return httpCall('/property/compare', {
-      method: 'POST',
-      body: JSON.stringify({ ids })
-    });
+    return {
+      properties: selected,
+      ai_comparison_summary: aiComparison?.summary || "Select at least 2 properties to generate an AI comparison summary.",
+      ai_comparison: aiComparison
+    };
   },
 
   async comparePropertiesAI(propertyId1, propertyId2, sessionId) {
