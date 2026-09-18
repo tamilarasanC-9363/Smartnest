@@ -1,14 +1,12 @@
 {
-  "name": "smartnest-ai",
+  "name": "smartnest-ai-frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm run dev --prefix frontend",
-    "build": "npm run build --prefix frontend",
-    "preview": "npm run preview --prefix frontend",
-    "test": "node backend/test-api.js",
-    "server": "npm start --prefix backend/server"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "canvas-confetti": "^1.9.3",
